@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState, FormEvent } from "react";
+import { use, useEffect, useState, FormEvent } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { WalletData } from "@/types/solana";
 import { isValidSolanaAddress } from "@/lib/validate";
@@ -11,10 +12,10 @@ type LoadState = "loading" | "error" | "ready" | "invalid";
 export default function WalletDetailPage({
   params,
 }: {
-  params: { address: string };
+  params: Promise<{ address: string }>;
 }) {
   const router = useRouter();
-  const { address } = params;
+  const { address } = use(params);
 
   const [wallet, setWallet] = useState<WalletData | null>(null);
   const [state, setState] = useState<LoadState>("loading");
@@ -153,8 +154,9 @@ function WalletSummary({ wallet }: { wallet: WalletData }) {
             <span style={{ textAlign: "right" }}>Value</span>
           </div>
           {wallet.tokens.map((holding) => (
-            <div
+            <Link
               key={holding.mint}
+              href={`/token/${holding.mint}`}
               className="ledger-row"
               style={{ gridTemplateColumns: "1fr 130px 110px" }}
             >
@@ -177,7 +179,7 @@ function WalletSummary({ wallet }: { wallet: WalletData }) {
               <div className="mono-cell" data-label="Value">
                 {formatUsd(holding.valueUsd)}
               </div>
-            </div>
+            </Link>
           ))}
         </div>
       )}
