@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { TrendingToken } from "@/types/solana";
 import { formatUsd, formatPercent } from "@/lib/format";
 
@@ -16,7 +17,7 @@ export default function TokenRow({
       : "change-down";
 
   return (
-    <div className="ledger-row">
+    <Link href={`/token/${token.mint}`} className="ledger-row">
       <div className="ledger-index">{String(index + 1).padStart(2, "0")}</div>
 
       <div className="token-identity">
@@ -52,6 +53,6 @@ export default function TokenRow({
       <div className="mono-cell" data-label="Mkt Cap">
         {formatUsd(token.marketCapUsd, { compact: true })}
       </div>
-    </div>
+    </Link>
   );
 }

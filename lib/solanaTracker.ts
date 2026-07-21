@@ -1,4 +1,4 @@
-import { TrendingToken, WalletData } from "@/types/solana";
+import { Candle, TokenDetails, TrendingToken, WalletData } from "@/types/solana";
 
 const BASE_URL = "https://data.solanatracker.io";
 const SOL_MINT = "So11111111111111111111111111111111111111112";
@@ -134,4 +134,99 @@ export async function fetchWalletPortfolio(
         valueUsd: h.value ?? null,
       })),
   };
+}
+
+// --- Token details -----------------------------------------------------
+
+// Raw /tokens/:mint response: token metadata plus a `pools` array in the
+// same shape as the trending endpoint, plus per-timeframe price events.
+interface RawTokenInfoResponse {
+  token?: {
+    name?: string;
+    symbol?: string;
+    mint?: string;
+    image?: string;
+  };
+  pools?: Array<{
+    price?: { usd?: number };
+    liquidity?: { usd?: number };
+    marketCap?: { usd?: number };
+  }>;
+  events?: {
+    "24h"?: { priceChangePercentage?: number };
+  };
+}
+
+export async function fetchTokenDetails(mint: string): Promise<TokenDetails> {
+  const raw = (await trackerFetch(`/tokens/${mint}`)) as RawTokenInfoResponse;
+
+  // Pools come back ordered by liquidity, so the first entry carries the
+  // reference price/market cap - same assumption the trending list makes.
+  const primaryPool = raw.pools?.[0];
+
+  return {
+    mint: raw.token?.mint ?? mint,
+    name: raw.token?.name ?? "Unknown token",
+    symbol: raw.token?.symbol ?? "?",
+    image: raw.token?.image ?? null,
+    priceUsd: primaryPool?.price?.usd ?? null,
+    change24h: raw.events?.["24h"]?.priceChangePercentage ?? null,
+    marketCapUsd: primaryPool?.marketCap?.usd ?? null,
+    liquidityUsd: primaryPool?.liquidity?.usd ?? null,
+  };
+}
+
+// --- OHLC chart ---------------------------------------------------------
+
+// Raw /chart/:mint?type=:interval response:
+// { oclhv: [{ open, close, low, high, volume, time }] }
+// (yes, the array key really is "oclhv"). `time` is Unix seconds.
+interface RawChartCandle {
+  open?: number;
+  high?: number;
+  low?: number;
+  close?: number;
+  time?: number;
+}
+
+interface RawChartResponse {
+  oclhv?: RawChartCandle[];
+}
+
+export async function fetchTokenChart(
+  mint: string,
+  interval: string
+): Promise<Candle[]> {
+  const raw = (await trackerFetch(
+    `/chart/${mint}?type=${encodeURIComponent(interval)}`
+  )) as RawChartResponse;
+
+  const rawCandles = Array.isArray(raw.oclhv) ? raw.oclhv : [];
+
+  // lightweight-charts is strict: times must be finite, unique and in
+  // ascending order. The upstream API doesn't guarantee any of that, so
+  // drop malformed rows, dedupe (last write wins) and sort here.
+  const byTime = new Map<number, Candle>();
+  for (const c of rawCandles) {
+    const { time, open, high, low, close } = c;
+    if (
+      typeof time !== "number" ||
+      !Number.isFinite(time) ||
+      !Number.isFinite(open) ||
+      !Number.isFinite(high) ||
+      !Number.isFinite(low) ||
+      !Number.isFinite(close)
+    ) {
+      continue;
+    }
+    byTime.set(time, {
+      time,
+      open: open as number,
+      high: high as number,
+      low: low as number,
+      close: close as number,
+    });
+  }
+
+  return [...byTime.values()].sort((a, b) => a.time - b.time);
 }
