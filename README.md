@@ -1,101 +1,109 @@
 # Solana Dashboard
 
-Track trending Solana tokens, keep a watchlist, and inspect any wallet's
-holdings. Free to use, no account needed. Built with Next.js (App Router),
-React 19 and TypeScript; market data comes from the
-[SolanaTracker Data API](https://docs.solanatracker.io).
+A small web app for keeping an eye on Solana tokens: see what's trending, star
+the ones you care about, open a candlestick chart, and look up what any wallet
+is holding. No account, no sign-up. Built with Next.js, React 19 and
+TypeScript, using the [SolanaTracker Data API](https://docs.solanatracker.io).
 
-## Features
+## What you can do
 
-| Route               | What it does                                                                                              |
-| ------------------- | --------------------------------------------------------------------------------------------------------- |
-| `/`                 | Trending tokens by window (5m / 1h / 6h / 24h): filter, sort any column, auto-refresh, star to watch      |
-| `/watchlist`        | Your starred tokens with live prices (one batched request for the whole list)                             |
-| `/token/[mint]`     | Price, 24h change, market cap, liquidity, candlestick + volume chart (1m–1d, auto log scale for 50x+ movers) with OHLC readout and local-time axis, copy mint, Solscan link              |
-| `/wallet`           | Look up any address; saved wallets with autosaving names; recent lookups                                  |
-| `/wallet/[address]` | SOL + token holdings, sorted by value, share of portfolio, hide unpriced/under-$1 "dust", save, copy      |
-| `/phantom`          | Connect Phantom (read-only) and open your own portfolio; restores a prior connection without a popup      |
-| `/api/health`       | Liveness probe for uptime monitors / containers                                                           |
+- **Trending** (`/`): tokens ranked over 5m, 1h, 6h or 24h. Filter by name or
+  mint, sort any column, star a token to watch it. Refreshes itself.
+- **Watchlist** (`/watchlist`): your starred tokens with live prices.
+- **Token page** (`/token/[mint]`): price, 24h change, market cap, liquidity,
+  and a candlestick chart with volume. Intervals from 1m to 1d, a log scale
+  (turned on automatically for tokens that moved 50x or more), an OHLC readout
+  on hover, and times in your own timezone.
+- **Wallets** (`/wallet`): look up any address and see SOL and token holdings
+  by value. Save wallets with a name, and hide worthless "dust" tokens.
+- **Phantom** (`/phantom`): connect Phantom to open your own portfolio. It only
+  reads your public address and never asks for a signature.
+- **Light and dark**: follows your system setting; the button in the navbar
+  switches between Auto, Light and Dark.
 
-Watchlist, saved wallets and recents live in the browser (`localStorage`):
-no sign-up, nothing sent to a server.
+Your watchlist, saved wallets and recent lookups are stored in your browser
+only. Nothing about them reaches a server.
 
-## How it works
+## Why the server is in the middle
+
+The browser never talks to SolanaTracker directly. It calls this app's own
+`/api/*` routes, and those call the provider.
 
 ```
-Browser ──▶ /api/*  (Next route handlers, server-side)
-              │  1. validate input (allowlists + real base58 check)
-              │  2. TTL cache · in-flight de-duplication · stale-if-error
-              │  3. call SolanaTracker with the API key (8s timeout)
-              ▼
-          SolanaTracker Data API
+Browser  →  /api/*  (Next route handlers)  →  SolanaTracker
+              validate input · cache · timeout · safe errors
 ```
 
-- **The API key never reaches the browser.** Only the route handlers read
+The reasons are practical:
+
+- **The API key stays on the server.** Only the route handlers read
   `SOLANA_TRACKER_API_KEY`.
-- **Caching is load-bearing, not an optimisation.** SolanaTracker's free plan
-  is documented as 1 request/second and 10,000 requests/month. Without a
-  cache, a handful of visitors would exhaust that in days. Each route caches
-  in memory (30s–15min depending on how fast the data moves), shares one
-  upstream call between concurrent requests, serves **stale data if the
-  provider is failing**, and sends `Cache-Control: s-maxage` so a CDN (e.g.
-  Vercel's) absorbs repeat traffic too. Responses carry `X-Cache: HIT|MISS|STALE`.
-- **Typed contract.** Every response is a versioned-by-convention JSON
-  envelope validated with [zod](https://zod.dev) in `lib/contracts.ts`; the
-  browser parses each response with the same schema, so drift fails loudly in
-  one place. Schemas are type-checked against `types/solana.ts`.
-- **Honest failure modes.** Provider failures map to meaningful statuses and
-  safe messages (never the provider's raw error text):
+- **The free plan is small** (1 request/second, 10,000 requests/month), so
+  caching is what keeps the app usable. Each route keeps results in memory for
+  30 seconds to 15 minutes depending on how fast the data changes, shares one
+  upstream call between simultaneous requests, and falls back to the last good
+  data if the provider is down. Responses also send `Cache-Control: s-maxage`
+  so a CDN can absorb repeat traffic, and an `X-Cache: HIT | MISS | STALE`
+  header shows what happened.
+- **Inputs are checked before anything is forwarded.** Timeframes and intervals
+  come from allowlists, and addresses must be real base58 that decode to 32
+  bytes.
+- **Responses are validated** with [zod](https://zod.dev) on the way out and
+  again in the browser, so a change in the data shape fails in one obvious
+  place instead of rendering `undefined`.
+- **Errors say something useful** without leaking the provider's raw message:
 
-  | Status | Meaning                                                  |
-  | ------ | -------------------------------------------------------- |
-  | 400    | Invalid input (bad address, timeframe, interval, mints)  |
-  | 404    | The provider has no data for that address                |
-  | 429    | Provider rate limit hit (`Retry-After` is passed through) |
-  | 502    | Provider down, or rejected this server's credentials     |
-  | 503    | This deployment has no API key configured                |
-  | 504    | Provider timed out                                       |
+  | Status | Meaning                                              |
+  | ------ | ---------------------------------------------------- |
+  | 400    | Bad input (address, timeframe, interval, mints)      |
+  | 404    | The provider has nothing for that address            |
+  | 429    | Rate limited by the provider (`Retry-After` passed on) |
+  | 502    | Provider is down or rejected this server's key       |
+  | 503    | No API key configured on this deployment             |
+  | 504    | Provider timed out                                   |
 
-### API
+### API routes
 
-All `GET`. The data routes return `{ ...data, fetchedAt }` (epoch ms the
-*server* last got the data from the provider) or `{ error }`.
+All are `GET` and return `{ ...data, fetchedAt }` or `{ error }`.
 
-| Route                                 | Notes                                                        | Cache  |
-| ------------------------------------- | ------------------------------------------------------------ | ------ |
-| `/api/trending?timeframe=1h`          | `5m 15m 30m 1h 2h 3h 4h 5h 6h 12h 24h`                       | 120s   |
-| `/api/token/:mint`                    | name, price, 24h change, market cap, liquidity               | 60s    |
-| `/api/wallet/:address`                | SOL + SPL holdings                                           | 60s    |
-| `/api/chart/:mint?interval=1h`        | `1m 5m 15m 1h 4h 1d`; explicit lookback window, malformed/duplicate candles cleaned, empty intervals filled with flat candles | 60–900s |
-| `/api/prices?mints=a,b,c`             | 1–50 mints, **one** upstream call (powers the watchlist)     | 30s    |
-| `/api/health`                         | `200 ok` / `503 degraded` (no key); never calls the provider | none   |
+| Route                          | Returns                                              | Cache    |
+| ------------------------------ | ---------------------------------------------------- | -------- |
+| `/api/trending?timeframe=1h`   | trending tokens (`5m` … `24h`)                       | 120s     |
+| `/api/token/:mint`             | name, price, 24h change, market cap, liquidity       | 60s      |
+| `/api/wallet/:address`         | SOL and token holdings                               | 60s      |
+| `/api/chart/:mint?interval=1h` | candles with volume (`1m 5m 15m 1h 4h 1d`)           | 30–900s  |
+| `/api/prices?mints=a,b,c`      | prices for up to 50 mints in one upstream call       | 30s      |
+| `/api/health`                  | `200 ok`, or `503` if no key is set                  | none     |
 
-## Run it
+The chart route asks for an explicit time window, drops malformed or duplicate
+candles, and fills intervals with no trades using flat candles, so the time
+axis isn't squashed.
+
+## Run it locally
 
 ```bash
 npm install
-cp .env.local.example .env.local   # then paste your SolanaTracker key
+cp .env.local.example .env.local   # add your SolanaTracker key
 npm run dev                         # http://localhost:3000
 ```
 
-Get a free key at [solanatracker.io](https://www.solanatracker.io/account)
+A free key is available at [solanatracker.io](https://www.solanatracker.io/account)
 (Data API tab).
 
-### Quality checks
+### Checks
 
 ```bash
-npm run lint        # ESLint (Next + React 19 hooks rules)
-npm run typecheck   # tsc --noEmit
+npm run lint        # ESLint
+npm run typecheck   # tsc
 npm test            # Vitest + React Testing Library
 npm run check       # all three
 ```
 
-Tests cover the validators, formatters, cache and upstream error mapping, every
-API route (including regression tests for rejecting malformed timeframes),
-the fetch hook, the persisted-list store, and each page's loading / error /
-empty / success states. CI (`.github/workflows/ci.yml`) runs lint, typecheck,
-tests and a production build on every push and pull request, then builds and
-smoke-tests the Docker image.
+The tests cover the validators and formatters, the cache and error mapping,
+every API route, the fetch hook, the saved-list store, the theme switch, and
+the loading / error / empty / success states of each page. GitHub Actions runs
+lint, typecheck, tests and a production build on every push and pull request,
+then builds and smoke-tests the Docker image.
 
 ### Docker
 
@@ -104,64 +112,50 @@ docker build -t solana-dashboard .
 docker run --rm -p 3000:3000 -e SOLANA_TRACKER_API_KEY=your_key solana-dashboard
 ```
 
-Multi-stage build, non-root user, and a healthcheck against `/api/health`
-(a container with no API key reports unhealthy on purpose).
+The image is multi-stage and runs as a non-root user. Its healthcheck calls
+`/api/health`, so a container without a key reports unhealthy on purpose.
 
 ### Deploy to Vercel
 
 1. Push to GitHub and [import the repo](https://vercel.com/new).
-2. Add `SOLANA_TRACKER_API_KEY` under **Project Settings → Environment Variables**.
-3. Deploy. Cookieless page-view analytics (`@vercel/analytics`) switch on
-   automatically on Vercel; enable **Analytics** in the project dashboard to see them.
+2. Add `SOLANA_TRACKER_API_KEY` under Project Settings → Environment Variables.
+3. Deploy. Cookieless page-view analytics turn on by themselves on Vercel;
+   enable Analytics in the project dashboard to see them.
 
-## Project structure
+## Project layout
 
 ```
-app/
-  page.tsx                      Trending
-  watchlist/ wallet/ token/ phantom/   Pages (+ per-section metadata)
-  api/{trending,token,wallet,chart,prices,health}/route.ts
-  error.tsx  not-found.tsx  robots.ts  icon.svg  layout.tsx  globals.css
-components/                     TokenRow, WatchButton, SavedWalletRow, Freshness, charts, state views
-hooks/
-  useApi.ts                     typed fetch: abort, retry, auto-refresh, stale-on-failed-refresh
-  usePersistedList.ts           useSyncExternalStore binding
-lib/
-  upstream.ts                   timeout, error mapping, TTL cache + dedupe + stale-if-error
-  solanaTracker.ts              provider calls + normalisation
-  contracts.ts                  zod schemas (the JSON contract)
-  persistedList.ts / stores.ts  localStorage-backed lists (validated, cross-tab, fail-safe)
-  validate.ts                   real base58 / 32-byte address check
-  tokenList.ts portfolio.ts format.ts
-types/solana.ts
+app/          pages, API route handlers, layout, global CSS
+components/   token rows, charts, buttons, theme switch, loading/error views
+hooks/        useApi (fetch with abort, retry, auto-refresh), usePersistedList
+lib/          upstream (timeout, cache, errors), solanaTracker (provider calls),
+              contracts (zod schemas), validate, format, stores
+types/        shared types
 ```
 
-## Design decisions and known limitations
+## Limits and trade-offs
 
-- **In-memory cache is per server instance.** On serverless platforms each
-  instance has its own cache; the `s-maxage` headers (CDN) are what provide
-  shared caching there. For heavy traffic, put Redis/Upstash behind `cached()`.
-- **No per-IP rate limiting.** Caching protects the provider quota, but an
-  abusive client can still hit uncached combinations (e.g. many different
-  wallet addresses). Add edge rate limiting before promoting this widely.
-- **Watchlist and saved wallets are per-browser.** Clearing site data or
-  switching devices loses them. Cross-device sync and price alerts would need
-  accounts and a database.
-- **Phantom is read-only.** The app only reads your public address; it never
-  requests signatures or transactions.
-- **Data accuracy is the provider's.** Prices can lag by minutes and the
-  footer says so. This is not financial advice.
-- **Security headers are set** (`nosniff`, frame deny, referrer, permissions
-  policy). A Content-Security-Policy is not: token images come from arbitrary
-  third-party hosts and Next needs inline scripts, so a useful CSP requires
-  nonce setup that is left for later.
-- **Stack choices:** `lightweight-charts` (TradingView, Apache-2.0, keeps its
-  attribution logo) for candles; zod for the contract; no UI framework: plain CSS
+- **The cache lives in each server instance's memory.** On serverless hosting
+  every instance has its own, so the CDN headers do the shared caching. With
+  real traffic, put Redis behind `cached()`.
+- **No per-IP rate limiting.** Caching protects the quota, but someone could
+  still request many different uncached wallet addresses. Add edge rate
+  limiting before sharing this widely.
+- **Watchlist and saved wallets are per browser.** Clearing site data or
+  switching devices loses them. Syncing them, or adding price alerts, would
+  need accounts and a database.
+- **Prices come from the provider** and can lag by a few minutes. This isn't
+  financial advice.
+- **No Content-Security-Policy yet.** Token images come from many third-party
+  hosts and Next needs inline scripts, so a useful policy needs a nonce setup.
+  Other security headers (`nosniff`, frame deny, referrer, permissions) are on.
+- **Chart library:** `lightweight-charts` by TradingView (Apache-2.0), which
+  requires keeping its logo. There's no UI framework; the styling is plain CSS
   with design tokens in `globals.css`.
 
-## Roadmap ideas
+## Ideas for later
 
-- Price alerts (needs auth + a store + a scheduled job)
-- Shareable trending filters via URL params
-- Redis-backed cache and edge rate limiting
-- Per-token holder / transaction views
+- Price alerts (needs auth, a store and a scheduled job)
+- Shareable trending filters in the URL
+- Redis cache and edge rate limiting
+- Holder and transaction views per token
