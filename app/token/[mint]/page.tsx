@@ -1,12 +1,20 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
-import { TokenDetails } from "@/types/solana";
+import { use } from "react";
+import { useApi } from "@/hooks/useApi";
+import { TokenResponseSchema } from "@/lib/contracts";
 import { isValidSolanaAddress } from "@/lib/validate";
-import { formatPercent, formatUsd, truncateAddress } from "@/lib/format";
+import { explorerUrl, formatPercent, formatUsd, truncateAddress } from "@/lib/format";
+import type { TokenDetails } from "@/types/solana";
 import TokenChart from "@/components/TokenChart";
+import TokenAvatar from "@/components/TokenAvatar";
+import WatchButton from "@/components/WatchButton";
+import CopyButton from "@/components/CopyButton";
+import Freshness from "@/components/Freshness";
+import { changeClass } from "@/components/TokenRow";
+import { ErrorBlock, LoadingBlock } from "@/components/StateViews";
 
-type LoadState = "loading" | "error" | "ready" | "invalid";
+const REFRESH_MS = 60_000;
 
 export default function TokenDetailPage({
   params,
@@ -14,55 +22,20 @@ export default function TokenDetailPage({
   params: Promise<{ mint: string }>;
 }) {
   const { mint } = use(params);
+  const valid = isValidSolanaAddress(mint);
 
-  const [token, setToken] = useState<TokenDetails | null>(null);
-  const [state, setState] = useState<LoadState>("loading");
-  const [errorMessage, setErrorMessage] = useState("");
-
-  useEffect(() => {
-    if (!isValidSolanaAddress(mint)) {
-      setState("invalid");
-      return;
-    }
-
-    let cancelled = false;
-
-    async function load() {
-      setState("loading");
-      try {
-        const res = await fetch(`/api/token/${mint}`);
-        const body = await res.json();
-
-        if (!res.ok) {
-          throw new Error(body?.error ?? "Failed to load token.");
-        }
-
-        if (!cancelled) {
-          setToken(body);
-          setState("ready");
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setErrorMessage(
-            err instanceof Error ? err.message : "Something went wrong."
-          );
-          setState("error");
-        }
-      }
-    }
-
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, [mint]);
+  const { status, data, error, isRefreshing, refetch } = useApi(
+    valid ? `/api/token/${mint}` : null,
+    TokenResponseSchema,
+    { refreshMs: REFRESH_MS }
+  );
 
   return (
     <>
       <div className="eyebrow">Token · Solana mainnet</div>
 
-      {state === "ready" && token ? (
-        <TokenHeader token={token} />
+      {status === "ready" && data ? (
+        <TokenHeader token={data.token} />
       ) : (
         <>
           <h1 className="page-title">Token</h1>
@@ -72,29 +45,30 @@ export default function TokenDetailPage({
         </>
       )}
 
-      {state === "invalid" && (
-        <div className="state-block error">
-          &quot;{truncateAddress(mint, 10)}&quot; isn&apos;t a valid Solana
-          token mint address.
+      {!valid && (
+        <div className="state-block error" role="alert">
+          &quot;{truncateAddress(mint, 10)}&quot; isn&apos;t a valid Solana token
+          mint address.
         </div>
       )}
 
-      {state === "loading" && (
-        <div className="state-block">
-          <div className="spinner" />
-          Loading token data…
-        </div>
+      {status === "loading" && <LoadingBlock label="Loading token data…" />}
+
+      {status === "error" && (
+        <ErrorBlock title="Couldn't load this token" message={error ?? ""} onRetry={refetch} />
       )}
 
-      {state === "error" && (
-        <div className="state-block error">
-          Couldn&apos;t load this token: {errorMessage}
-        </div>
-      )}
-
-      {state === "ready" && token && (
+      {status === "ready" && data && (
         <>
-          <TokenStats token={token} />
+          <div className="action-row">
+            <Freshness
+              updatedAt={data.fetchedAt}
+              isRefreshing={isRefreshing}
+              error={error}
+              onRefresh={refetch}
+            />
+          </div>
+          <TokenStats token={data.token} />
           <TokenChart mint={mint} />
         </>
       )}
@@ -105,42 +79,31 @@ export default function TokenDetailPage({
 function TokenHeader({ token }: { token: TokenDetails }) {
   return (
     <div className="token-header">
-      {token.image ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={token.image}
-          alt=""
-          className="token-avatar token-avatar-large"
-          onError={(e) => {
-            (e.currentTarget as HTMLImageElement).style.display = "none";
-          }}
-        />
-      ) : (
-        <div className="token-avatar-fallback token-avatar-large">
-          {token.symbol.slice(0, 2).toUpperCase()}
-        </div>
-      )}
-      <div style={{ minWidth: 0 }}>
+      <TokenAvatar image={token.image} symbol={token.symbol} large />
+      <div style={{ minWidth: 0, flex: 1 }}>
         <h1 className="page-title">{token.name}</h1>
         <div className="token-header-meta">
           <span className="token-symbol-badge">{token.symbol}</span>
           <span className="token-mint" title={token.mint}>
             {truncateAddress(token.mint, 6)}
           </span>
+          <CopyButton value={token.mint} label="Copy token mint address" />
+          <a
+            className="ghost-button small"
+            href={explorerUrl("token", token.mint)}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Solscan ↗
+          </a>
         </div>
       </div>
+      <WatchButton token={token} variant="full" />
     </div>
   );
 }
 
 function TokenStats({ token }: { token: TokenDetails }) {
-  const changeClass =
-    token.change24h === null
-      ? ""
-      : token.change24h >= 0
-      ? "change-up"
-      : "change-down";
-
   return (
     <div className="summary-grid">
       <div className="summary-card">
@@ -149,7 +112,7 @@ function TokenStats({ token }: { token: TokenDetails }) {
       </div>
       <div className="summary-card">
         <div className="summary-label">24h change</div>
-        <div className={`summary-value ${changeClass}`}>
+        <div className={`summary-value ${changeClass(token.change24h)}`}>
           {formatPercent(token.change24h)}
         </div>
       </div>
@@ -157,6 +120,12 @@ function TokenStats({ token }: { token: TokenDetails }) {
         <div className="summary-label">Market cap</div>
         <div className="summary-value">
           {formatUsd(token.marketCapUsd, { compact: true })}
+        </div>
+      </div>
+      <div className="summary-card">
+        <div className="summary-label">Liquidity</div>
+        <div className="summary-value">
+          {formatUsd(token.liquidityUsd, { compact: true })}
         </div>
       </div>
     </div>

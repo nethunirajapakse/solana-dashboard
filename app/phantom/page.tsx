@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
+import CopyButton from "@/components/CopyButton";
+import SaveWalletButton from "@/components/SaveWalletButton";
 
 const PHANTOM_STORE_URL =
   "https://chromewebstore.google.com/detail/phantom/bfnaelmomeimhlpmgjnjophhpkkoljpa?hl=en";
@@ -8,9 +11,13 @@ const PHANTOM_STORE_URL =
 // Phantom injects itself as window.solana (and, on newer versions,
 // window.phantom.solana). We only declare the handful of members we
 // actually touch rather than pulling in the full @solana/web3.js types.
+type PhantomKey = { toString: () => string };
 interface PhantomProvider {
   isPhantom?: boolean;
-  connect: () => Promise<{ publicKey: { toString: () => string } }>;
+  connect: (opts?: { onlyIfTrusted?: boolean }) => Promise<{ publicKey: PhantomKey }>;
+  disconnect: () => Promise<void>;
+  on?: (event: string, handler: (arg?: PhantomKey | null) => void) => void;
+  off?: (event: string, handler: (arg?: PhantomKey | null) => void) => void;
 }
 
 declare global {
@@ -27,42 +34,88 @@ function getPhantomProvider(): PhantomProvider | null {
   return null;
 }
 
-type Status = "checking" | "not-installed" | "installed" | "connecting" | "connected" | "error";
+type Detection = "checking" | "found" | "missing";
 
 export default function PhantomPage() {
-  const [status, setStatus] = useState<Status>("checking");
-  const [publicKey, setPublicKey] = useState<string>("");
+  const [detection, setDetection] = useState<Detection>("checking");
+  const [publicKey, setPublicKey] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
 
+  // Phantom injects its provider asynchronously, so poll briefly before
+  // concluding it isn't installed.
   useEffect(() => {
-    // Phantom injects its provider asynchronously, so we check once
-    // immediately and once more on window load in case the extension
-    // hasn't finished injecting yet.
-    const check = () => {
-      setStatus(getPhantomProvider() ? "installed" : "not-installed");
-    };
-    check();
-    window.addEventListener("load", check);
-    return () => window.removeEventListener("load", check);
+    let attempts = 0;
+    const id = window.setInterval(() => {
+      if (getPhantomProvider()) {
+        setDetection("found");
+        window.clearInterval(id);
+      } else if (++attempts >= 10) {
+        setDetection("missing");
+        window.clearInterval(id);
+      }
+    }, 150);
+    return () => window.clearInterval(id);
   }, []);
+
+  // Once found: silently restore a previously-approved connection (no
+  // popup), and follow the extension when the user switches accounts or
+  // disconnects from inside Phantom.
+  useEffect(() => {
+    if (detection !== "found") return;
+    const provider = getPhantomProvider();
+    if (!provider) return;
+
+    let cancelled = false;
+    provider
+      .connect({ onlyIfTrusted: true })
+      .then((resp) => {
+        if (!cancelled) setPublicKey(resp.publicKey.toString());
+      })
+      .catch(() => {
+        // Not previously approved: wait for the user to click Connect.
+      });
+
+    const onAccountChanged = (key?: PhantomKey | null) =>
+      setPublicKey(key ? key.toString() : null);
+    const onDisconnect = () => setPublicKey(null);
+    provider.on?.("accountChanged", onAccountChanged);
+    provider.on?.("disconnect", onDisconnect);
+
+    return () => {
+      cancelled = true;
+      provider.off?.("accountChanged", onAccountChanged);
+      provider.off?.("disconnect", onDisconnect);
+    };
+  }, [detection]);
 
   async function handleConnect() {
     const provider = getPhantomProvider();
     if (!provider) {
-      setStatus("not-installed");
+      setDetection("missing");
       return;
     }
-
-    setStatus("connecting");
+    setConnecting(true);
+    setErrorMessage("");
     try {
       const resp = await provider.connect();
       setPublicKey(resp.publicKey.toString());
-      setStatus("connected");
     } catch (err) {
       setErrorMessage(
-        err instanceof Error ? err.message : "Connection was rejected."
+        err instanceof Error && err.message
+          ? err.message
+          : "Connection was rejected."
       );
-      setStatus("error");
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  async function handleDisconnect() {
+    try {
+      await getPhantomProvider()?.disconnect();
+    } finally {
+      setPublicKey(null);
     }
   }
 
@@ -71,23 +124,25 @@ export default function PhantomPage() {
       <div className="eyebrow">Wallet connect</div>
       <h1 className="page-title">Phantom wallet</h1>
       <p className="page-subtitle">
-        Connect your Phantom browser extension to view your public key.
+        Connect your Phantom browser extension to open your own portfolio. This
+        is read-only: the app only sees your public address and can never move
+        funds or request signatures.
       </p>
 
       <div className="phantom-panel">
-        {status === "checking" && (
-          <>
-            <div className="spinner" />
+        {detection === "checking" && (
+          <div role="status">
+            <div className="spinner" aria-hidden="true" />
             Checking for Phantom…
-          </>
+          </div>
         )}
 
-        {status === "not-installed" && (
+        {detection === "missing" && (
           <>
-            <div className="phantom-ghost">👻</div>
+            <div className="phantom-ghost" aria-hidden="true">👻</div>
             <p>
-              Install Phantom Wallet extension on Google Chrome to use this
-              feature
+              Install the Phantom wallet extension in Chrome to use this
+              feature.
             </p>
             <a
               className="install-link"
@@ -97,35 +152,53 @@ export default function PhantomPage() {
             >
               Get Phantom from the Chrome Web Store →
             </a>
+            <p className="muted-note">
+              No extension? You can still{" "}
+              <Link href="/wallet" className="install-link">
+                look up any wallet by address
+              </Link>
+              .
+            </p>
           </>
         )}
 
-        {(status === "installed" ||
-          status === "connecting" ||
-          status === "error") && (
+        {detection === "found" && !publicKey && (
           <>
-            <div className="phantom-ghost">👻</div>
-            <p>Phantom is installed. Connect to view your public key.</p>
+            <div className="phantom-ghost" aria-hidden="true">👻</div>
+            <p>Phantom is installed. Connect to open your portfolio.</p>
             <button
+              type="button"
               className="connect-button"
               onClick={handleConnect}
-              disabled={status === "connecting"}
+              disabled={connecting}
             >
-              {status === "connecting" ? "Connecting…" : "Connect Phantom"}
+              {connecting ? "Connecting…" : "Connect Phantom"}
             </button>
-            {status === "error" && (
-              <div className="field-error" style={{ marginTop: 16 }}>
+            {errorMessage && (
+              <div className="field-error" role="alert" style={{ marginTop: 16 }}>
                 {errorMessage}
               </div>
             )}
           </>
         )}
 
-        {status === "connected" && (
+        {detection === "found" && publicKey && (
           <>
-            <div className="phantom-ghost">👻</div>
-            <p>Connected. Your public key:</p>
+            <div className="phantom-ghost" aria-hidden="true">👻</div>
+            <p>Connected. Your public address:</p>
             <div className="phantom-key">{publicKey}</div>
+            <div className="action-row center">
+              <Link href={`/wallet/${publicKey}`} className="connect-button as-link">
+                View my portfolio →
+              </Link>
+            </div>
+            <div className="action-row center">
+              <CopyButton value={publicKey} label="Copy your public address" />
+              <SaveWalletButton address={publicKey} />
+              <button type="button" className="ghost-button small" onClick={handleDisconnect}>
+                Disconnect
+              </button>
+            </div>
           </>
         )}
       </div>

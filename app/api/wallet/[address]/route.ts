@@ -1,5 +1,5 @@
-import { NextResponse } from "next/server";
-import { fetchWalletPortfolio } from "@/lib/solanaTracker";
+import { badRequest, respond } from "@/lib/api";
+import { fetchWalletPortfolio, TTL } from "@/lib/solanaTracker";
 import { isValidSolanaAddress } from "@/lib/validate";
 
 export async function GET(
@@ -9,18 +9,13 @@ export async function GET(
   const { address } = await params;
 
   if (!isValidSolanaAddress(address)) {
-    return NextResponse.json(
-      { error: "That doesn't look like a valid Solana wallet address." },
-      { status: 400 }
-    );
+    return badRequest("That doesn't look like a valid Solana wallet address.");
   }
 
-  try {
-    const wallet = await fetchWalletPortfolio(address);
-    return NextResponse.json(wallet);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    console.error("[/api/wallet/:address]", message);
-    return NextResponse.json({ error: message }, { status: 502 });
-  }
+  return respond(
+    "/api/wallet/:address",
+    TTL.wallet,
+    () => fetchWalletPortfolio(address),
+    (wallet, fetchedAt) => ({ wallet, fetchedAt })
+  );
 }

@@ -1,104 +1,167 @@
 # Solana Dashboard
 
-A live Solana analytics dashboard built with **Next.js (App Router) + TypeScript** — trending tokens, candlestick price charts, wallet lookups, and Phantom wallet connection, all backed by the [SolanaTracker Data API](https://docs.solanatracker.io).
-
-The API key stays server-side: the browser only ever talks to internal Next.js API routes, which are the sole place the key is read.
+Track trending Solana tokens, keep a watchlist, and inspect any wallet's
+holdings. Free to use, no account needed. Built with Next.js (App Router),
+React 19 and TypeScript; market data comes from the
+[SolanaTracker Data API](https://docs.solanatracker.io).
 
 ## Features
 
-- **Trending tokens** — the hottest Solana tokens by trading volume over the last hour, with price, 24h change, and market cap (`/`)
-- **Token detail pages** — price, 24h change, market cap, and an interactive candlestick chart with switchable intervals (`/token/[mint]`)
-- **Wallet explorer** — SOL balance and full SPL token holdings for any address, with base58 validation on both client and server (`/wallet/[address]`)
-- **Phantom integration** — extension detection, one-click connect, and public-key display; falls back to a mobile deep link that opens the page inside the Phantom app's browser (`/phantom`)
-- **Deliberate UX states** — every data view has explicit loading (skeletons/spinners), error, empty, and invalid-input states
+| Route               | What it does                                                                                              |
+| ------------------- | --------------------------------------------------------------------------------------------------------- |
+| `/`                 | Trending tokens by window (5m / 1h / 6h / 24h): filter, sort any column, auto-refresh, star to watch      |
+| `/watchlist`        | Your starred tokens with live prices (one batched request for the whole list)                             |
+| `/token/[mint]`     | Price, 24h change, market cap, liquidity, candlestick + volume chart (1m–1d, auto log scale for 50x+ movers) with OHLC readout and local-time axis, copy mint, Solscan link              |
+| `/wallet`           | Look up any address; saved wallets with autosaving names; recent lookups                                  |
+| `/wallet/[address]` | SOL + token holdings, sorted by value, share of portfolio, hide unpriced/under-$1 "dust", save, copy      |
+| `/phantom`          | Connect Phantom (read-only) and open your own portfolio; restores a prior connection without a popup      |
+| `/api/health`       | Liveness probe for uptime monitors / containers                                                           |
 
-## Tech stack
+Watchlist, saved wallets and recents live in the browser (`localStorage`):
+no sign-up, nothing sent to a server.
 
-| Layer   | Choice                                                          |
-| ------- | --------------------------------------------------------------- |
-| Framework | Next.js 16 (App Router, TypeScript)                           |
-| UI      | React 18, custom CSS design tokens (no UI library)              |
-| Charts  | [`lightweight-charts`](https://tradingview.github.io/lightweight-charts/) (client-only via dynamic import) |
-| Data    | SolanaTracker Data API                                          |
-| Wallet  | Phantom provider API (`window.solana` / `window.phantom.solana`) |
-
-## Architecture
-
-The browser never touches SolanaTracker directly. Data pages call internal
-API routes, and only those server-side routes read the key and call the
-upstream API:
+## How it works
 
 ```
-Browser → /api/trending           → server reads SOLANA_TRACKER_API_KEY → SolanaTracker
-Browser → /api/token/[mint]       → server reads SOLANA_TRACKER_API_KEY → SolanaTracker
-Browser → /api/chart/[mint]       → server reads SOLANA_TRACKER_API_KEY → SolanaTracker
-Browser → /api/wallet/[address]   → server reads SOLANA_TRACKER_API_KEY → SolanaTracker
+Browser ──▶ /api/*  (Next route handlers, server-side)
+              │  1. validate input (allowlists + real base58 check)
+              │  2. TTL cache · in-flight de-duplication · stale-if-error
+              │  3. call SolanaTracker with the API key (8s timeout)
+              ▼
+          SolanaTracker Data API
 ```
 
-- `lib/solanaTracker.ts` — fetches from SolanaTracker and normalizes responses into the flat shapes in `types/solana.ts`
-- `lib/validate.ts` — base58 address check, run client-side (instant feedback) *and* server-side (since the client check can be bypassed by hitting the route directly)
-- `lib/format.ts` — currency / percent / amount formatting helpers
+- **The API key never reaches the browser.** Only the route handlers read
+  `SOLANA_TRACKER_API_KEY`.
+- **Caching is load-bearing, not an optimisation.** SolanaTracker's free plan
+  is documented as 1 request/second and 10,000 requests/month. Without a
+  cache, a handful of visitors would exhaust that in days. Each route caches
+  in memory (30s–15min depending on how fast the data moves), shares one
+  upstream call between concurrent requests, serves **stale data if the
+  provider is failing**, and sends `Cache-Control: s-maxage` so a CDN (e.g.
+  Vercel's) absorbs repeat traffic too. Responses carry `X-Cache: HIT|MISS|STALE`.
+- **Typed contract.** Every response is a versioned-by-convention JSON
+  envelope validated with [zod](https://zod.dev) in `lib/contracts.ts`; the
+  browser parses each response with the same schema, so drift fails loudly in
+  one place. Schemas are type-checked against `types/solana.ts`.
+- **Honest failure modes.** Provider failures map to meaningful statuses and
+  safe messages (never the provider's raw error text):
 
-## Getting started
+  | Status | Meaning                                                  |
+  | ------ | -------------------------------------------------------- |
+  | 400    | Invalid input (bad address, timeframe, interval, mints)  |
+  | 404    | The provider has no data for that address                |
+  | 429    | Provider rate limit hit (`Retry-After` is passed through) |
+  | 502    | Provider down, or rejected this server's credentials     |
+  | 503    | This deployment has no API key configured                |
+  | 504    | Provider timed out                                       |
 
-### 1. Get an API key
+### API
 
-Sign up at [solanatracker.io](https://www.solanatracker.io/account) (free tier works) and copy your key from the **Data API** tab.
+All `GET`. The data routes return `{ ...data, fetchedAt }` (epoch ms the
+*server* last got the data from the provider) or `{ error }`.
 
-### 2. Run locally
+| Route                                 | Notes                                                        | Cache  |
+| ------------------------------------- | ------------------------------------------------------------ | ------ |
+| `/api/trending?timeframe=1h`          | `5m 15m 30m 1h 2h 3h 4h 5h 6h 12h 24h`                       | 120s   |
+| `/api/token/:mint`                    | name, price, 24h change, market cap, liquidity               | 60s    |
+| `/api/wallet/:address`                | SOL + SPL holdings                                           | 60s    |
+| `/api/chart/:mint?interval=1h`        | `1m 5m 15m 1h 4h 1d`; explicit lookback window, malformed/duplicate candles cleaned, empty intervals filled with flat candles | 60–900s |
+| `/api/prices?mints=a,b,c`             | 1–50 mints, **one** upstream call (powers the watchlist)     | 30s    |
+| `/api/health`                         | `200 ok` / `503 degraded` (no key); never calls the provider | none   |
+
+## Run it
 
 ```bash
 npm install
-cp .env.local.example .env.local
-# paste your key into .env.local:
-#   SOLANA_TRACKER_API_KEY=your_real_key
-
-npm run dev
+cp .env.local.example .env.local   # then paste your SolanaTracker key
+npm run dev                         # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000). `.env.local` is gitignored and will never be committed.
+Get a free key at [solanatracker.io](https://www.solanatracker.io/account)
+(Data API tab).
 
-### 3. Try it
-
-- `/` — trending tokens load automatically
-- `/wallet` — paste any Solana address and hit "Look up"
-- `/phantom` — needs the [Phantom extension](https://chromewebstore.google.com/detail/phantom/bfnaelmomeimhlpmgjnjophhpkkoljpa); on mobile it offers a deep link into the Phantom app instead
-
-## Deployment (Vercel)
+### Quality checks
 
 ```bash
-vercel
+npm run lint        # ESLint (Next + React 19 hooks rules)
+npm run typecheck   # tsc --noEmit
+npm test            # Vitest + React Testing Library
+npm run check       # all three
 ```
 
-Or push to GitHub, [import into Vercel](https://vercel.com/new), and add `SOLANA_TRACKER_API_KEY` under **Project Settings → Environment Variables**. The key is read server-side only, so it never needs to be in the repo.
+Tests cover the validators, formatters, cache and upstream error mapping, every
+API route (including regression tests for rejecting malformed timeframes),
+the fetch hook, the persisted-list store, and each page's loading / error /
+empty / success states. CI (`.github/workflows/ci.yml`) runs lint, typecheck,
+tests and a production build on every push and pull request, then builds and
+smoke-tests the Docker image.
+
+### Docker
+
+```bash
+docker build -t solana-dashboard .
+docker run --rm -p 3000:3000 -e SOLANA_TRACKER_API_KEY=your_key solana-dashboard
+```
+
+Multi-stage build, non-root user, and a healthcheck against `/api/health`
+(a container with no API key reports unhealthy on purpose).
+
+### Deploy to Vercel
+
+1. Push to GitHub and [import the repo](https://vercel.com/new).
+2. Add `SOLANA_TRACKER_API_KEY` under **Project Settings → Environment Variables**.
+3. Deploy. Cookieless page-view analytics (`@vercel/analytics`) switch on
+   automatically on Vercel; enable **Analytics** in the project dashboard to see them.
 
 ## Project structure
 
 ```
 app/
-  page.tsx                       Trending tokens
-  token/[mint]/page.tsx          Token detail + chart
-  wallet/page.tsx                Wallet search / redirect
-  wallet/[address]/page.tsx      Wallet detail
-  phantom/page.tsx               Phantom detection + connect
-  api/trending/route.ts          Server route → trending
-  api/token/[mint]/route.ts      Server route → token details
-  api/chart/[mint]/route.ts      Server route → OHLC candles
-  api/wallet/[address]/route.ts  Server route → wallet balances
-  layout.tsx, globals.css        Shell + design tokens
-components/
-  Navbar.tsx, TokenRow.tsx, TokenChart.tsx, CandlestickChart.tsx
+  page.tsx                      Trending
+  watchlist/ wallet/ token/ phantom/   Pages (+ per-section metadata)
+  api/{trending,token,wallet,chart,prices,health}/route.ts
+  error.tsx  not-found.tsx  robots.ts  icon.svg  layout.tsx  globals.css
+components/                     TokenRow, WatchButton, SavedWalletRow, Freshness, charts, state views
+hooks/
+  useApi.ts                     typed fetch: abort, retry, auto-refresh, stale-on-failed-refresh
+  usePersistedList.ts           useSyncExternalStore binding
 lib/
-  solanaTracker.ts               Server-side fetch + normalization
-  validate.ts                    Address format validation
-  format.ts                      Currency / percent / amount formatting
-types/
-  solana.ts                      Shared TS interfaces
+  upstream.ts                   timeout, error mapping, TTL cache + dedupe + stale-if-error
+  solanaTracker.ts              provider calls + normalisation
+  contracts.ts                  zod schemas (the JSON contract)
+  persistedList.ts / stores.ts  localStorage-backed lists (validated, cross-tab, fail-safe)
+  validate.ts                   real base58 / 32-byte address check
+  tokenList.ts portfolio.ts format.ts
+types/solana.ts
 ```
 
-## Design decisions
+## Design decisions and known limitations
 
-- **Server-side proxy over client-side fetch** — a `NEXT_PUBLIC_` key would ship to every visitor's browser, so all upstream calls go through `/api/*` routes.
-- **`lightweight-charts` loaded with `ssr: false`** — the chart library needs the DOM, so it's kept out of the SSR pass entirely via `next/dynamic`.
-- **Validation in two places** — checked client-side for UX, re-checked in the API route because the route is directly reachable.
-- **No silent failures** — each data page renders distinct loading, error, empty, and invalid states instead of a single catch-all.
+- **In-memory cache is per server instance.** On serverless platforms each
+  instance has its own cache; the `s-maxage` headers (CDN) are what provide
+  shared caching there. For heavy traffic, put Redis/Upstash behind `cached()`.
+- **No per-IP rate limiting.** Caching protects the provider quota, but an
+  abusive client can still hit uncached combinations (e.g. many different
+  wallet addresses). Add edge rate limiting before promoting this widely.
+- **Watchlist and saved wallets are per-browser.** Clearing site data or
+  switching devices loses them. Cross-device sync and price alerts would need
+  accounts and a database.
+- **Phantom is read-only.** The app only reads your public address; it never
+  requests signatures or transactions.
+- **Data accuracy is the provider's.** Prices can lag by minutes and the
+  footer says so. This is not financial advice.
+- **Security headers are set** (`nosniff`, frame deny, referrer, permissions
+  policy). A Content-Security-Policy is not: token images come from arbitrary
+  third-party hosts and Next needs inline scripts, so a useful CSP requires
+  nonce setup that is left for later.
+- **Stack choices:** `lightweight-charts` (TradingView, Apache-2.0, keeps its
+  attribution logo) for candles; zod for the contract; no UI framework: plain CSS
+  with design tokens in `globals.css`.
+
+## Roadmap ideas
+
+- Price alerts (needs auth + a store + a scheduled job)
+- Shareable trending filters via URL params
+- Redis-backed cache and edge rate limiting
+- Per-token holder / transaction views

@@ -1,94 +1,139 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { TrendingToken } from "@/types/solana";
+import { useMemo, useState } from "react";
+import { useApi } from "@/hooks/useApi";
+import { TrendingResponseSchema } from "@/lib/contracts";
+import { filterTokens, nextSort, sortTokens } from "@/lib/tokenList";
+import type { SortKey, SortState } from "@/lib/tokenList";
+import { TIMEFRAME_TABS } from "@/types/solana";
+import type { TrendingTimeframe } from "@/types/solana";
 import TokenRow from "@/components/TokenRow";
+import Freshness from "@/components/Freshness";
+import { EmptyBlock, ErrorBlock, SkeletonRows } from "@/components/StateViews";
 
-type LoadState = "loading" | "error" | "ready";
+// Matches the server's cache lifetime (TTL.trending): refreshing faster
+// would only return the same cached data and cost nothing but noise.
+const REFRESH_MS = 120_000;
+
+const SORTABLE: { key: SortKey; label: string }[] = [
+  { key: "priceUsd", label: "Price" },
+  { key: "change1h", label: "1h" },
+  { key: "change24h", label: "24h" },
+  { key: "marketCapUsd", label: "Mkt Cap" },
+];
 
 export default function TrendingPage() {
-  const [tokens, setTokens] = useState<TrendingToken[]>([]);
-  const [state, setState] = useState<LoadState>("loading");
-  const [errorMessage, setErrorMessage] = useState<string>("");
+  const [timeframe, setTimeframe] = useState<TrendingTimeframe>("1h");
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<SortState | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  const { status, data, error, isRefreshing, refetch } = useApi(
+    `/api/trending?timeframe=${timeframe}`,
+    TrendingResponseSchema,
+    { refreshMs: REFRESH_MS }
+  );
 
-    async function load() {
-      setState("loading");
-      try {
-        const res = await fetch("/api/trending?timeframe=1h");
-        const body = await res.json();
-
-        if (!res.ok) {
-          throw new Error(body?.error ?? "Failed to load trending tokens.");
-        }
-
-        if (!cancelled) {
-          setTokens(body.tokens);
-          setState("ready");
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setErrorMessage(
-            err instanceof Error ? err.message : "Something went wrong."
-          );
-          setState("error");
-        }
-      }
-    }
-
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const visible = useMemo(
+    () => (data ? sortTokens(filterTokens(data.tokens, query), sort) : []),
+    [data, query, sort]
+  );
 
   return (
     <>
       <div className="eyebrow">Live feed · Solana mainnet</div>
       <h1 className="page-title">Trending tokens</h1>
       <p className="page-subtitle">
-        Ranked by trading volume over the last hour, via the SolanaTracker
-        Data API.
+        Ranked by activity over the selected window, via the SolanaTracker Data
+        API. Star a token to add it to your watchlist.
       </p>
 
-      {state === "loading" && <TrendingSkeleton />}
-
-      {state === "error" && (
-        <div className="state-block error">
-          Couldn&apos;t load trending tokens: {errorMessage}
+      <div className="toolbar">
+        <div className="interval-tabs" role="tablist" aria-label="Trending window">
+          {TIMEFRAME_TABS.map((value) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={timeframe === value}
+              className={`interval-tab ${timeframe === value ? "active" : ""}`}
+              onClick={() => setTimeframe(value)}
+            >
+              {value}
+            </button>
+          ))}
         </div>
+
+        <input
+          className="filter-input"
+          type="search"
+          placeholder="Filter by name, symbol or mint"
+          aria-label="Filter tokens"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          spellCheck={false}
+        />
+
+        <Freshness
+          updatedAt={data?.fetchedAt ?? null}
+          isRefreshing={isRefreshing}
+          error={status === "ready" ? error : null}
+          onRefresh={refetch}
+        />
+      </div>
+
+      {status === "loading" && <SkeletonRows />}
+
+      {status === "error" && (
+        <ErrorBlock title="Couldn't load trending tokens" message={error ?? ""} onRetry={refetch} />
       )}
 
-      {state === "ready" && tokens.length === 0 && (
-        <div className="state-block">No trending tokens right now.</div>
+      {status === "ready" && data && data.tokens.length === 0 && (
+        <EmptyBlock>No trending tokens right now.</EmptyBlock>
       )}
 
-      {state === "ready" && tokens.length > 0 && (
-        <div className="ledger">
-          <div className="ledger-head">
-            <span>#</span>
-            <span>Token</span>
-            <span style={{ textAlign: "right" }}>Price</span>
-            <span style={{ textAlign: "right" }}>24h</span>
-            <span style={{ textAlign: "right" }}>Mkt Cap</span>
+      {status === "ready" && data && data.tokens.length > 0 && visible.length === 0 && (
+        <EmptyBlock>
+          No tokens match &quot;{query.trim()}&quot; in this window.
+        </EmptyBlock>
+      )}
+
+      {status === "ready" && visible.length > 0 && (
+        <div className="ledger ledger--trending" role="table" aria-label="Trending tokens">
+          <div className="ledger-head" role="row">
+            <span role="columnheader">#</span>
+            <span role="columnheader">Token</span>
+            {SORTABLE.map(({ key, label }) => {
+              const active = sort?.key === key;
+              return (
+                <span
+                  key={key}
+                  role="columnheader"
+                  aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}
+                  style={{ textAlign: "right" }}
+                >
+                  <button
+                    type="button"
+                    className={`sort-button${active ? " active" : ""}`}
+                    onClick={() => setSort(nextSort(sort, key))}
+                    title={`Sort by ${label}`}
+                  >
+                    {label}
+                    <span aria-hidden="true">
+                      {active ? (sort.dir === "asc" ? " ▲" : " ▼") : ""}
+                    </span>
+                  </button>
+                </span>
+              );
+            })}
+            <span role="columnheader" className="visually-hidden">
+              Watch
+            </span>
           </div>
-          {tokens.map((token, i) => (
+          {visible.map((token, i) => (
             <TokenRow key={token.mint} token={token} index={i} />
           ))}
         </div>
       )}
     </>
-  );
-}
-
-function TrendingSkeleton() {
-  return (
-    <div className="ledger">
-      {Array.from({ length: 8 }).map((_, i) => (
-        <div key={i} className="skeleton-row" />
-      ))}
-    </div>
   );
 }

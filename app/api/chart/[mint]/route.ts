@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
-import { fetchTokenChart } from "@/lib/solanaTracker";
+import { NextRequest } from "next/server";
+import { badRequest, respond } from "@/lib/api";
+import { fetchTokenChart, TTL } from "@/lib/solanaTracker";
 import { isValidSolanaAddress } from "@/lib/validate";
 import { CHART_INTERVALS, isChartInterval } from "@/types/solana";
 
@@ -10,26 +11,18 @@ export async function GET(
   const { mint } = await params;
 
   if (!isValidSolanaAddress(mint)) {
-    return NextResponse.json(
-      { error: "That doesn't look like a valid Solana token mint address." },
-      { status: 400 }
-    );
+    return badRequest("That doesn't look like a valid Solana token mint address.");
   }
 
   const interval = request.nextUrl.searchParams.get("interval") ?? "1h";
   if (!isChartInterval(interval)) {
-    return NextResponse.json(
-      { error: `Invalid interval. Use one of: ${CHART_INTERVALS.join(", ")}.` },
-      { status: 400 }
-    );
+    return badRequest(`Invalid interval. Use one of: ${CHART_INTERVALS.join(", ")}.`);
   }
 
-  try {
-    const candles = await fetchTokenChart(mint, interval);
-    return NextResponse.json({ candles });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    console.error("[/api/chart/:mint]", message);
-    return NextResponse.json({ error: message }, { status: 502 });
-  }
+  return respond(
+    "/api/chart/:mint",
+    TTL.chart[interval],
+    () => fetchTokenChart(mint, interval),
+    (candles, fetchedAt) => ({ candles, fetchedAt })
+  );
 }

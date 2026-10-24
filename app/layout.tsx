@@ -1,10 +1,34 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
+import { Analytics } from "@vercel/analytics/next";
 import "./globals.css";
 import Navbar from "@/components/Navbar";
+import Footer from "@/components/Footer";
+
+const siteUrl =
+  process.env.NEXT_PUBLIC_SITE_URL ??
+  (process.env.VERCEL_PROJECT_PRODUCTION_URL
+    ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
+    : "http://localhost:3000");
+
+const description =
+  "Track trending Solana tokens, build a watchlist, and inspect any wallet's holdings. Free, no account needed.";
 
 export const metadata: Metadata = {
-  title: "Solana Dashboard",
-  description: "Trending Solana tokens and wallet lookup, powered by SolanaTracker.",
+  metadataBase: new URL(siteUrl),
+  title: { default: "Solana Dashboard", template: "%s · Solana Dashboard" },
+  description,
+  openGraph: {
+    title: "Solana Dashboard",
+    description,
+    type: "website",
+    siteName: "Solana Dashboard",
+  },
+  twitter: { card: "summary", title: "Solana Dashboard", description },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#0b0f14",
+  colorScheme: "dark",
 };
 
 export default function RootLayout({
@@ -14,9 +38,21 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>
+      {/* suppressHydrationWarning: browser extensions (e.g. Grammarly) inject
+          attributes into <body> before React hydrates. Only silences this
+          element's own attributes, not its children. */}
+      <body suppressHydrationWarning>
+        <a href="#main" className="skip-link">
+          Skip to content
+        </a>
         <Navbar />
-        <main className="page">{children}</main>
+        <main id="main" className="page">
+          {children}
+        </main>
+        <Footer />
+        {/* Cookieless page-view analytics. Vercel-only: elsewhere its script
+            endpoint doesn't exist and would just 404. */}
+        {process.env.VERCEL ? <Analytics /> : null}
       </body>
     </html>
   );

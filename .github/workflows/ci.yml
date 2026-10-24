@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      # The build never calls the data provider, so no API key is needed here.
+      - run: npm run build
+
+  docker:
+    name: Docker image builds
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t solana-dashboard:ci .
+      - name: Smoke-test the container
+        run: |
+          docker run -d --name app -p 3000:3000 -e SOLANA_TRACKER_API_KEY=ci-placeholder solana-dashboard:ci
+          for i in $(seq 1 20); do
+            curl -fsS http://localhost:3000/api/health && exit 0
+            sleep 1
+          done
+          docker logs app
+          exit 1

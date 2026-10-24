@@ -1,13 +1,27 @@
 "use client";
 
-import { use, useEffect, useState, FormEvent } from "react";
+import { use, useEffect, useMemo, useState, FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { WalletData } from "@/types/solana";
+import { useApi } from "@/hooks/useApi";
+import { WalletResponseSchema } from "@/lib/contracts";
 import { isValidSolanaAddress } from "@/lib/validate";
-import { formatAmount, formatUsd, truncateAddress } from "@/lib/format";
+import {
+  explorerUrl,
+  formatAmount,
+  formatUsd,
+  truncateAddress,
+} from "@/lib/format";
+import { isDust, shareOfTotal, sortHoldings } from "@/lib/portfolio";
+import type { HoldingSort, HoldingSortKey } from "@/lib/portfolio";
+import { recentWallets } from "@/lib/stores";
+import type { WalletData } from "@/types/solana";
+import CopyButton from "@/components/CopyButton";
+import Freshness from "@/components/Freshness";
+import SaveWalletButton from "@/components/SaveWalletButton";
+import { ErrorBlock, LoadingBlock, EmptyBlock } from "@/components/StateViews";
 
-type LoadState = "loading" | "error" | "ready" | "invalid";
+const REFRESH_MS = 60_000;
 
 export default function WalletDetailPage({
   params,
@@ -16,49 +30,19 @@ export default function WalletDetailPage({
 }) {
   const router = useRouter();
   const { address } = use(params);
-
-  const [wallet, setWallet] = useState<WalletData | null>(null);
-  const [state, setState] = useState<LoadState>("loading");
-  const [errorMessage, setErrorMessage] = useState("");
+  const valid = isValidSolanaAddress(address);
   const [searchValue, setSearchValue] = useState("");
 
+  const { status, data, error, isRefreshing, refetch } = useApi(
+    valid ? `/api/wallet/${address}` : null,
+    WalletResponseSchema,
+    { refreshMs: REFRESH_MS }
+  );
+
+  // Remember successful lookups so they show up under "Recent" on /wallet.
   useEffect(() => {
-    if (!isValidSolanaAddress(address)) {
-      setState("invalid");
-      return;
-    }
-
-    let cancelled = false;
-
-    async function load() {
-      setState("loading");
-      try {
-        const res = await fetch(`/api/wallet/${address}`);
-        const body = await res.json();
-
-        if (!res.ok) {
-          throw new Error(body?.error ?? "Failed to load wallet.");
-        }
-
-        if (!cancelled) {
-          setWallet(body);
-          setState("ready");
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setErrorMessage(
-            err instanceof Error ? err.message : "Something went wrong."
-          );
-          setState("error");
-        }
-      }
-    }
-
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, [address]);
+    if (status === "ready") recentWallets.add({ address, visitedAt: Date.now() });
+  }, [status, address]);
 
   function handleSearchSubmit(e: FormEvent) {
     e.preventDefault();
@@ -71,16 +55,39 @@ export default function WalletDetailPage({
     <>
       <div className="eyebrow">Wallet lookup</div>
       <h1 className="page-title">
-        {state === "ready" ? truncateAddress(address, 6) : "Wallet"}
+        {status === "ready" ? truncateAddress(address, 6) : "Wallet"}
       </h1>
-      <p className="page-subtitle" style={{ wordBreak: "break-all" }}>
+      <p className="page-subtitle" style={{ wordBreak: "break-all", marginBottom: 12 }}>
         {address}
       </p>
+
+      {valid && (
+        <div className="action-row">
+          <CopyButton value={address} label="Copy wallet address" />
+          <a
+            className="ghost-button small"
+            href={explorerUrl("account", address)}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            View on Solscan ↗
+          </a>
+          <SaveWalletButton address={address} />
+          <span className="action-spacer" />
+          <Freshness
+            updatedAt={data?.fetchedAt ?? null}
+            isRefreshing={isRefreshing}
+            error={status === "ready" ? error : null}
+            onRefresh={refetch}
+          />
+        </div>
+      )}
 
       <form className="search-form" onSubmit={handleSearchSubmit}>
         <input
           className="search-input"
           placeholder="Look up a different address"
+          aria-label="Look up a different Solana address"
           value={searchValue}
           onChange={(e) => setSearchValue(e.target.value)}
           spellCheck={false}
@@ -90,40 +97,67 @@ export default function WalletDetailPage({
         </button>
       </form>
 
-      {state === "invalid" && (
-        <div className="state-block error">
+      {!valid && (
+        <div className="state-block error" role="alert">
           &quot;{truncateAddress(address, 10)}&quot; isn&apos;t a valid Solana
           wallet address.
         </div>
       )}
 
-      {state === "loading" && (
-        <div className="state-block">
-          <div className="spinner" />
-          Loading wallet data…
-        </div>
+      {status === "loading" && <LoadingBlock label="Loading wallet data…" />}
+
+      {status === "error" && (
+        <ErrorBlock title="Couldn't load this wallet" message={error ?? ""} onRetry={refetch} />
       )}
 
-      {state === "error" && (
-        <div className="state-block error">
-          Couldn&apos;t load this wallet: {errorMessage}
-        </div>
-      )}
-
-      {state === "ready" && wallet && <WalletSummary wallet={wallet} />}
+      {status === "ready" && data && <WalletSummary wallet={data.wallet} />}
     </>
   );
 }
 
 function WalletSummary({ wallet }: { wallet: WalletData }) {
+  const [sort, setSort] = useState<HoldingSort>({ key: "valueUsd", dir: "desc" });
+  const [hideDust, setHideDust] = useState(false);
+
+  const dustCount = useMemo(() => wallet.tokens.filter(isDust).length, [wallet.tokens]);
+  const rows = useMemo(() => {
+    const base = hideDust ? wallet.tokens.filter((t) => !isDust(t)) : wallet.tokens;
+    return sortHoldings(base, sort);
+  }, [wallet.tokens, hideDust, sort]);
+
+  function toggleSort(key: HoldingSortKey) {
+    setSort((prev) =>
+      prev.key === key
+        ? { key, dir: prev.dir === "desc" ? "asc" : "desc" }
+        : { key, dir: "desc" }
+    );
+  }
+
+  const sortHeader = (key: HoldingSortKey, label: string) => (
+    <span
+      role="columnheader"
+      aria-sort={sort.key === key ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}
+      style={{ textAlign: "right" }}
+    >
+      <button
+        type="button"
+        className={`sort-button${sort.key === key ? " active" : ""}`}
+        onClick={() => toggleSort(key)}
+      >
+        {label}
+        <span aria-hidden="true">
+          {sort.key === key ? (sort.dir === "asc" ? " ▲" : " ▼") : ""}
+        </span>
+      </button>
+    </span>
+  );
+
   return (
     <>
       <div className="summary-grid">
         <div className="summary-card">
           <div className="summary-label">SOL balance</div>
-          <div className="summary-value">
-            {formatAmount(wallet.solBalance)} SOL
-          </div>
+          <div className="summary-value">{formatAmount(wallet.solBalance)} SOL</div>
         </div>
         <div className="summary-card">
           <div className="summary-label">SOL value</div>
@@ -131,56 +165,68 @@ function WalletSummary({ wallet }: { wallet: WalletData }) {
         </div>
         <div className="summary-card">
           <div className="summary-label">Total portfolio value</div>
-          <div className="summary-value">
-            {formatUsd(wallet.totalValueUsd)}
-          </div>
+          <div className="summary-value">{formatUsd(wallet.totalValueUsd)}</div>
         </div>
       </div>
 
-      <div className="section-heading">
-        Token holdings ({wallet.tokens.length})
+      <div className="section-row">
+        <div className="section-heading" style={{ margin: 0 }}>
+          Token holdings ({rows.length}
+          {rows.length !== wallet.tokens.length ? ` of ${wallet.tokens.length}` : ""})
+        </div>
+        {dustCount > 0 && (
+          <label className="check-label">
+            <input
+              type="checkbox"
+              checked={hideDust}
+              onChange={(e) => setHideDust(e.target.checked)}
+            />
+            Hide unpriced / under $1 ({dustCount})
+          </label>
+        )}
       </div>
 
       {wallet.tokens.length === 0 ? (
-        <div className="state-block">No SPL token balances found.</div>
+        <EmptyBlock>No SPL token balances found.</EmptyBlock>
+      ) : rows.length === 0 ? (
+        <EmptyBlock>Every token here is unpriced or under $1.</EmptyBlock>
       ) : (
-        <div className="ledger">
-          <div
-            className="ledger-head"
-            style={{ gridTemplateColumns: "1fr 130px 110px" }}
-          >
-            <span>Token</span>
-            <span style={{ textAlign: "right" }}>Balance</span>
-            <span style={{ textAlign: "right" }}>Value</span>
+        <div className="ledger ledger--wallet" role="table" aria-label="Token holdings">
+          <div className="ledger-head" role="row">
+            <span role="columnheader">Token</span>
+            {sortHeader("amount", "Balance")}
+            {sortHeader("valueUsd", "Value")}
+            <span role="columnheader" style={{ textAlign: "right" }}>Share</span>
           </div>
-          {wallet.tokens.map((holding) => (
-            <Link
-              key={holding.mint}
-              href={`/token/${holding.mint}`}
-              className="ledger-row"
-              style={{ gridTemplateColumns: "1fr 130px 110px" }}
-            >
-              <div className="token-identity">
-                <div className="token-avatar-fallback">
-                  {(holding.symbol ?? "?").slice(0, 2).toUpperCase()}
-                </div>
-                <div style={{ minWidth: 0 }}>
-                  <div className="token-name">
-                    {holding.name ?? "Unknown token"}
+          {rows.map((holding) => {
+            const share = shareOfTotal(holding.valueUsd, wallet.totalValueUsd);
+            return (
+              <div key={holding.mint} className="ledger-row" role="row">
+                <div className="token-identity" role="cell">
+                  <div className="token-avatar-fallback" aria-hidden="true">
+                    {(holding.symbol ?? "?").slice(0, 2).toUpperCase()}
                   </div>
-                  <div className="token-symbol">
-                    {holding.symbol ?? truncateAddress(holding.mint)}
+                  <div style={{ minWidth: 0 }}>
+                    <Link href={`/token/${holding.mint}`} className="row-link">
+                      <span className="token-name">{holding.name ?? "Unknown token"}</span>
+                    </Link>
+                    <div className="token-symbol">
+                      {holding.symbol ?? truncateAddress(holding.mint)}
+                    </div>
                   </div>
                 </div>
+                <div className="mono-cell" data-label="Balance" role="cell">
+                  {formatAmount(holding.amount)}
+                </div>
+                <div className="mono-cell" data-label="Value" role="cell">
+                  {formatUsd(holding.valueUsd)}
+                </div>
+                <div className="mono-cell" data-label="Share" role="cell">
+                  {share === null ? "—" : `${share < 0.1 ? "<0.1" : share.toFixed(1)}%`}
+                </div>
               </div>
-              <div className="mono-cell" data-label="Balance">
-                {formatAmount(holding.amount)}
-              </div>
-              <div className="mono-cell" data-label="Value">
-                {formatUsd(holding.valueUsd)}
-              </div>
-            </Link>
-          ))}
+            );
+          })}
         </div>
       )}
     </>
