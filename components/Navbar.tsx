@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import ThemeToggle from "@/components/ThemeToggle";
 import { usePersistedList } from "@/hooks/usePersistedList";
 import { watchlist } from "@/lib/stores";
 
@@ -41,6 +42,7 @@ export default function Navbar() {
             );
           })}
         </nav>
+        <ThemeToggle />
       </div>
     </header>
   );
