@@ -13,7 +13,7 @@
     "check": "npm run lint && npm run typecheck && npm test"
   },
   "dependencies": {
-    "@vercel/analytics": "^1.6.1",
+    "@vercel/analytics": "^2.0.1",
     "lightweight-charts": "^5.2.0",
     "next": "^16.2.10",
     "react": "^19.3.1",
