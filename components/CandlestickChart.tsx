@@ -24,10 +24,26 @@ import { formatChartPrice, formatVolume } from "@/lib/format";
 // library measures and paints into a real DOM node, so this component must
 // only ever run in the browser - TokenChart loads it via next/dynamic ssr:false.
 
-const UP = "#4fd1ae";
-const DOWN = "#ff6b6b";
-const UP_VOLUME = "rgba(79, 209, 174, 0.35)";
-const DOWN_VOLUME = "rgba(255, 107, 107, 0.35)";
+// Matches the CSS tokens in globals.css (light by default, dark via OS setting).
+const PALETTES = {
+  light: {
+    up: "#1f7a4d", down: "#b3372b", upVol: "rgba(31, 122, 77, 0.30)", downVol: "rgba(179, 55, 43, 0.30)",
+    text: "#6b675c", grid: "rgba(27, 26, 23, 0.07)", border: "#d8d2c2", cross: "#1b1a17",
+  },
+  dark: {
+    up: "#6cc291", down: "#e5786b", upVol: "rgba(108, 194, 145, 0.30)", downVol: "rgba(229, 120, 107, 0.30)",
+    text: "#a09a8a", grid: "rgba(236, 232, 221, 0.07)", border: "#38352d", cross: "#ece8dd",
+  },
+} as const;
+type Palette = (typeof PALETTES)[keyof typeof PALETTES];
+const prefersDark = () => {
+  if (typeof document === "undefined") return false;
+  const forced = document.documentElement.dataset.theme;
+  if (forced === "dark") return true;
+  if (forced === "light") return false;
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches === true;
+};
+const currentPalette = (): Palette => (prefersDark() ? PALETTES.dark : PALETTES.light);
 
 /**
  * How many bar slots the first view spans. It adapts to the data: a token
@@ -98,6 +114,22 @@ export default function CandlestickChart({
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const byTimeRef = useRef<Map<number, Candle>>(new Map());
   const positionedKeyRef = useRef<string | null>(null);
+  const [palette, setPalette] = useState<Palette>(currentPalette);
+
+  // Follow the OS light/dark setting live.
+  useEffect(() => {
+    const mq = window.matchMedia?.("(prefers-color-scheme: dark)");
+    if (!mq) return;
+    const onChange = () => setPalette(currentPalette());
+    mq.addEventListener("change", onChange);
+    // The theme toggle sets data-theme on <html>.
+    const observer = new MutationObserver(onChange);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => {
+      mq.removeEventListener("change", onChange);
+      observer.disconnect();
+    };
+  }, []);
 
   // The candle under the crosshair (null -> show the latest candle).
   const [hovered, setHovered] = useState<Candle | null>(null);
@@ -112,17 +144,17 @@ export default function CandlestickChart({
       autoSize: true,
       layout: {
         background: { type: ColorType.Solid, color: "transparent" },
-        textColor: "#8b98a5",
+        textColor: palette.text,
         fontFamily: "'IBM Plex Mono', ui-monospace, monospace",
         fontSize: 11,
       },
       grid: {
-        vertLines: { color: "rgba(33, 43, 56, 0.55)" },
-        horzLines: { color: "rgba(33, 43, 56, 0.55)" },
+        vertLines: { color: palette.grid },
+        horzLines: { color: palette.grid },
       },
-      rightPriceScale: { borderColor: "#212b38" },
+      rightPriceScale: { borderColor: palette.border },
       timeScale: {
-        borderColor: "#212b38",
+        borderColor: palette.border,
         timeVisible: true,
         secondsVisible: false,
         barSpacing: 10,
@@ -137,17 +169,17 @@ export default function CandlestickChart({
         priceFormatter: axisPrice,
       },
       crosshair: {
-        vertLine: { color: "#7c9cff", labelBackgroundColor: "#7c9cff" },
-        horzLine: { color: "#7c9cff", labelBackgroundColor: "#7c9cff" },
+        vertLine: { color: palette.cross, labelBackgroundColor: palette.cross },
+        horzLine: { color: palette.cross, labelBackgroundColor: palette.cross },
       },
     });
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: UP,
-      downColor: DOWN,
+      upColor: palette.up,
+      downColor: palette.down,
       borderVisible: false,
-      wickUpColor: UP,
-      wickDownColor: DOWN,
+      wickUpColor: palette.up,
+      wickDownColor: palette.down,
       // Custom formatter: the built-in one rounds micro-prices to "0.00".
       priceFormat: { type: "custom", formatter: axisPrice, minMove: 0.01 },
     });
@@ -177,7 +209,27 @@ export default function CandlestickChart({
       volumeSeriesRef.current = null;
       positionedKeyRef.current = null;
     };
+    // Created once; palette changes are applied by the effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    chart.applyOptions({
+      layout: { textColor: palette.text },
+      grid: { vertLines: { color: palette.grid }, horzLines: { color: palette.grid } },
+      rightPriceScale: { borderColor: palette.border },
+      timeScale: { borderColor: palette.border },
+      crosshair: {
+        vertLine: { color: palette.cross, labelBackgroundColor: palette.cross },
+        horzLine: { color: palette.cross, labelBackgroundColor: palette.cross },
+      },
+    });
+    candleSeriesRef.current?.applyOptions({
+      upColor: palette.up, downColor: palette.down, wickUpColor: palette.up, wickDownColor: palette.down,
+    });
+  }, [palette]);
 
   // Push new data whenever the fetched candles change (new interval, or a refresh).
   useEffect(() => {
@@ -202,7 +254,7 @@ export default function CandlestickChart({
     const volumeData: HistogramData<UTCTimestamp>[] = candles.map((c) => ({
       time: c.time as UTCTimestamp,
       value: c.volume,
-      color: c.close >= c.open ? UP_VOLUME : DOWN_VOLUME,
+      color: c.close >= c.open ? palette.upVol : palette.downVol,
     }));
     candleSeries.setData(candleData);
     volumeSeries.setData(volumeData);
@@ -219,7 +271,7 @@ export default function CandlestickChart({
       });
       positionedKeyRef.current = resetKey;
     }
-  }, [candles, resetKey]);
+  }, [candles, resetKey, palette]);
 
   useEffect(() => {
     candleSeriesRef.current?.priceScale().applyOptions({
